@@ -293,6 +293,29 @@ jobs:
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
 
+      - name: Build Installer 💿
+        if: fromJSON(needs.check-event.outputs.package)
+        run: |
+          # Build Installer 💿 (Inno Setup)
+          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "${env:ProgramFiles}\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y | Out-Null
+            $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "${env:ProgramFiles}\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $iscc) { Write-Output "::error::Inno Setup (ISCC.exe) not found"; exit 1 }
+
+          $config = '${{ needs.check-event.outputs.config }}'
+          $source = "${{ github.workspace }}\release\${config}\${{ steps.setup.outputs.pluginName }}"
+          $output = & $iscc.FullName "/DAppVersion=${{ steps.setup.outputs.pluginVersion }}" "/DSourceDir=${source}" "/DOutputDir=${{ github.workspace }}\release" installer\vertical-plus.iss 2>&1
+          $output | Write-Output
+          if ($LASTEXITCODE -ne 0) {
+            $output | Select-String -Pattern 'Error' | Select-Object -First 8 | ForEach-Object { Write-Output "::error::$($_.Line.Trim())" }
+            exit 1
+          }
+          Get-ChildItem "${{ github.workspace }}\release" -Filter *.exe | ForEach-Object {
+            Write-Output "::notice::installer $($_.Name) ($($_.Length) bytes)"
+          }
+
       - name: Upload Artifacts 📡
         uses: actions/upload-artifact@v4
         with:

@@ -21,19 +21,36 @@ jobs:
 
   create-release:
     name: Create Release 🛫
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || github.ref_name == 'main'
     runs-on: ubuntu-24.04
     needs: build-project
     defaults:
       run:
         shell: bash
     steps:
+      - name: Read Version 🔢
+        if: github.ref_type != 'tag'
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: buildspec.json
+          sparse-checkout-cone-mode: false
+
       - name: Check Release Tag ☑️
         id: check
         run: |
           : Check Release Tag ☑️
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s extglob
+
+          # Vertical+: a push to main publishes (or refreshes) the release for
+          # the version in buildspec.json, so there is always a direct download.
+          if [[ "${GITHUB_REF_TYPE}" != 'tag' ]]; then
+            version="$(jq -r .version buildspec.json)"
+            echo 'validTag=true' >> $GITHUB_OUTPUT
+            echo 'prerelease=false' >> $GITHUB_OUTPUT
+            echo "version=${version}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           case "${GITHUB_REF_NAME}" in
             +([0-9]).+([0-9]).+([0-9]) )
@@ -89,7 +106,15 @@ jobs:
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s extglob
 
-          echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
+          {
+            echo "**Windows:** download \`vertical-plus-*-windows-x64-Installer.exe\` below and run it. It installs into OBS Studio 32+ (close OBS first)."
+            echo
+            echo "Windows may show *Windows protected your PC* because the installer is not code-signed: click **More info → Run anyway**."
+            echo
+            echo "Built from commit ${GITHUB_SHA:0:9}."
+            echo
+            echo "### Checksums"
+          } > ${{ github.workspace }}/CHECKSUMS.txt
           for file in ${{ github.workspace }}/@(*.exe|*.deb|*.ddeb|*.pkg|*.tar.xz|*.zip); do
             echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
           done
@@ -97,9 +122,12 @@ jobs:
       - name: Create Release 🛫
         if: fromJSON(steps.check.outputs.validTag)
         id: create_release
-        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564
+        uses: softprops/action-gh-release@v2
         with:
           draft: false
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          overwrite_files: true
           prerelease: ${{ fromJSON(steps.check.outputs.prerelease) }}
           tag_name: ${{ steps.check.outputs.version }}
           name: ${{ needs.build-project.outputs.pluginName }} ${{ steps.check.outputs.version }}

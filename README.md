@@ -61,22 +61,29 @@ Hotkeys (Settings > Hotkeys): switch to each vertical scene, start/stop vertical
 
 ## Installing (Windows)
 
-1. Open this repo's **Releases** page (or the latest run under **Actions**) and download `vertical-plus-<version>-windows-x64.zip`.
-2. Close OBS.
-3. Unzip it into `C:\ProgramData\obs-studio\plugins\`, so you end up with
-   `C:\ProgramData\obs-studio\plugins\vertical-plus\bin\64bit\vertical-plus.dll` and
-   `C:\ProgramData\obs-studio\plugins\vertical-plus\data\locale\en-US.ini`.
-   (`ProgramData` is hidden by default: paste the path into Explorer's address bar.)
-4. Start OBS 32 or newer. **Docks > Vertical+** and **Tools > Vertical+ Settings** should appear.
-   If not, check **Help > Log Files > View Current Log** for `vertical-plus`.
+1. Open this repo's [**Releases**](https://github.com/manreyes420/vertical-plus/releases/latest) page and download
+   `vertical-plus-<version>-windows-x64-Installer.exe`.
+2. Close OBS, then run the installer. It is not code-signed yet, so Windows may say
+   *Windows protected your PC*: click **More info → Run anyway**.
+3. Start OBS Studio 32 or newer. **Docks → Vertical+** and **Tools → Vertical+ Settings** should appear.
+   If not, check **Help → Log Files → View Current Log** for `vertical-plus`.
 
-This folder survives OBS updates. To uninstall, delete `C:\ProgramData\obs-studio\plugins\vertical-plus`.
+The installer puts the plugin in `C:\ProgramData\obs-studio\plugins\vertical-plus\` (this folder survives
+OBS updates), warns if OBS is missing or older than 32, waits for OBS to be closed, and adds
+**Vertical+ for OBS** to Windows' *Installed apps* so it can be uninstalled. Your Vertical+ settings
+(in your OBS profile) are kept when uninstalling.
+
+Manual install: download the `windows-x64.zip` from the same page and unzip it into
+`C:\ProgramData\obs-studio\plugins\`.
 
 ## Building
 
 GitHub Actions builds Windows and Ubuntu packages on every push to `main`
 (this repo is based on the official [obs-plugintemplate](https://github.com/obsproject/obs-plugintemplate)).
-Pushing a tag such as `0.1.0` also creates a GitHub Release with the packages attached.
+Every push to `main` also publishes (or refreshes) the GitHub Release for the version in
+`buildspec.json`, with the Windows installer, zip and Linux packages attached. Bump `version`
+in `buildspec.json` to start a new release. The installer is built with Inno Setup from
+`installer/vertical-plus.iss`.
 
 It builds against OBS Studio 32.0.0 headers, so it loads in any OBS 32.x.
 The obs-deps and Qt downloads are checked against OBS's own published hashes, and the
