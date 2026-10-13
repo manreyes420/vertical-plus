@@ -1,0 +1,117 @@
+# Vertical+ for OBS Studio
+
+A second, vertical (9:16) canvas that streams and records alongside your normal 16:9 output, built on the native canvas API in OBS Studio 32. It does what Aitum Vertical does and fixes its four most-reported problems:
+
+| Aitum Vertical | Vertical+ |
+| --- | --- |
+| Vertical-only audio sources don't reach the vertical stream | **Isolated vertical audio bus**: vertical hears exactly what is visible on vertical, on its own reserved track; nothing vertical-only leaks into the main stream |
+| Toggling a source on one canvas leaves the other out of sync | **Linked visibility** across canvases, from clicks, hotkeys or automation |
+| Two full scene renders every frame | **Main Canvas Reframe** source (crops the finished main frame), **idle parking**, encoder **fps divisor** |
+| Stream Deck / Streamer.bot / websocket can't see vertical scenes | **obs-websocket vendor `vertical-plus`** + hotkeys for every vertical scene and output |
+
+Requires **OBS Studio 32.0+** on Windows, macOS or Linux (X11 preview; Wayland preview is a TODO).
+
+## How the audio isolation works
+
+The vertical canvas is created with `ACTIVATE | MIX_AUDIO | SCENE_REF`, but channel 0 holds a private **program source**, not the scene. That source:
+
+- renders the vertical transition (and so the current vertical scene) as its video,
+- is the only root of the vertical canvas in the global audio mix, and writes **only the reserved track** (default 6),
+- sums every visible audio source on the vertical canvas directly from that source's own buffer.
+
+Vertical scenes are therefore never mixed into tracks 1-5. A source shared with the main canvas (your mic) is root-mixed once by libobs for the main tracks and read once by the bus for track 6, so it is never doubled. Every other source is kept off the reserved track automatically.
+
+This was verified headlessly against libobs built from obs-studio master (Oct 2026), see `tests/test-audio-bus.cpp`:
+
+```
+1. mic shared, game main-only, music vertical-only   track 1 = 0.500  track 6 = 0.300  PASS
+2. music hidden on vertical                          track 1 = 0.500  track 6 = 0.100  PASS
+3. mic hidden on vertical only                       track 1 = 0.500  track 6 = 0.200  PASS
+4. mic fader at 50% (applies to both)                track 1 = 0.450  track 6 = 0.250  PASS
+5. music muted                                       track 1 = 0.500  track 6 = 0.100  PASS
+6. vertical parked                                   track 1 = 0.500  track 6 = 0.000  PASS
+```
+
+The same test with the naive setup (scene directly on an audio-mixing canvas) leaks the vertical-only music into the main stream (track 1 = 0.700) and leaves track 6 silent, which is the behaviour Aitum users report.
+
+## Using it
+
+1. Install, start OBS, open **Docks > Vertical+**.
+2. Add vertical scenes with **+**; add sources from the **+** menu (existing inputs, main scenes, or a **Main Canvas Reframe**). Right-click a source for Fit / Fill / Top half / Bottom half, link toggle, properties and filters.
+3. **Tools > Vertical+ Settings**: canvas size, reserved track, encoder, server and key, recording folder and format, start-with-main options.
+4. Make sure your main outputs do not use the reserved track; the dock warns if they do.
+
+### Automation
+
+`CallVendorRequest` with `vendorName: "vertical-plus"`:
+
+| requestType | requestData | response |
+| --- | --- | --- |
+| `GetStatus` | - | width, height, currentScene, streaming, recording, parked, audioTrack |
+| `GetSceneList` | - | scenes[] (sceneName, sceneUuid), currentScene |
+| `SetCurrentScene` | sceneName | success |
+| `SetItemVisible` | sceneName, sourceName, visible, link (default true), canvas ("vertical" or "main") | success |
+| `StartStream` / `StopStream` | - | success |
+| `StartRecord` / `StopRecord` | - | success, outputPath on stop |
+| `SetReframePreset` | sourceName, preset (center, left, right, full, custom), durationMs | success |
+
+Vendor events: `SceneChanged`, `StreamStateChanged`, `RecordStateChanged`.
+
+Hotkeys (Settings > Hotkeys): switch to each vertical scene, start/stop vertical stream, start/stop vertical recording; each Reframe source adds next/previous framing.
+
+## Installing (Windows)
+
+1. Open this repo's **Releases** page (or the latest run under **Actions**) and download `vertical-plus-<version>-windows-x64.zip`.
+2. Close OBS.
+3. Unzip it into `C:\ProgramData\obs-studio\plugins\`, so you end up with
+   `C:\ProgramData\obs-studio\plugins\vertical-plus\bin\64bit\vertical-plus.dll` and
+   `C:\ProgramData\obs-studio\plugins\vertical-plus\data\locale\en-US.ini`.
+   (`ProgramData` is hidden by default: paste the path into Explorer's address bar.)
+4. Start OBS 32 or newer. **Docks > Vertical+** and **Tools > Vertical+ Settings** should appear.
+   If not, check **Help > Log Files > View Current Log** for `vertical-plus`.
+
+This folder survives OBS updates. To uninstall, delete `C:\ProgramData\obs-studio\plugins\vertical-plus`.
+
+## Building
+
+GitHub Actions builds Windows, macOS and Ubuntu packages on every push to `main`
+(this repo is based on the official [obs-plugintemplate](https://github.com/obsproject/obs-plugintemplate)).
+Pushing a tag such as `0.1.0` also creates a GitHub Release with the packages attached.
+
+It builds against OBS Studio 32.0.0 headers, so it loads in any OBS 32.x.
+The obs-deps and Qt downloads are checked against OBS's own published hashes. The OBS
+source archive hash is printed in the build log on first build (`pin this in buildspec.json`).
+
+Local build: `cmake --preset windows-x64` then `cmake --build --preset windows-x64`
+(see the template's documentation for prerequisites).
+
+## Layout
+
+| File | Job |
+| --- | --- |
+| `src/plugin-main.cpp` | Module load, frontend events, Tools menu |
+| `src/canvas-manager.cpp` | Find or create the canvas, scenes, idle parking, hotkeys |
+| `src/audio-bus.cpp` | Program source / isolated audio bus, reserved-track handling |
+| `src/reframe-source.cpp` | Main Canvas Reframe source with eased framing presets |
+| `src/visibility-link.cpp` | Linked visibility across canvases |
+| `src/outputs.cpp` | Vertical stream + recording, encoders |
+| `src/websocket-api.cpp` | obs-websocket vendor requests and events |
+| `src/settings.cpp` | Per-profile `vertical-plus.json`, settings dialog |
+| `src/dock.cpp` | Qt dock: preview, scene and source lists, output buttons |
+| `tests/test-audio-bus.cpp` | Headless libobs test of the audio isolation |
+
+## Status and known gaps
+
+What has been checked: every source file compiles cleanly with GCC 13 and Clang against current libobs, frontend API and Qt 6 headers; the linked plugin's only unresolved symbols are frontend-API functions; the audio bus passes the headless test above. It has **not yet been run inside the OBS app**, so the dock, outputs and settings dialog need a first real-world pass.
+
+Known gaps (milestone 4 in the design spec):
+
+- Drag-to-transform in the dock preview (use the layout presets for now).
+- Audio crossfade during vertical fades (audio cuts at the start of the transition).
+- Per-canvas volume for shared sources (the fader applies to both canvases).
+- Wayland preview; HDR colour handling in the Reframe source.
+- Changing the reserved track while vertical outputs are live applies on the next start.
+
+## License
+
+GPL-2.0-or-later. `src/external/obs-websocket-api.h` is from obs-websocket (GPL-2.0-or-later).
