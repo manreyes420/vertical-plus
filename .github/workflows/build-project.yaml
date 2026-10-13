@@ -73,6 +73,9 @@ jobs:
 
   macos-build:
     name: Build for macOS 🍏
+    # Disabled: the template cannot yet configure OBS 32's Swift-based
+    # libobs-metal on macOS ("can not determine linker language").
+    if: false
     runs-on: macos-15
     needs: check-event
     defaults:

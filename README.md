@@ -74,13 +74,14 @@ This folder survives OBS updates. To uninstall, delete `C:\ProgramData\obs-studi
 
 ## Building
 
-GitHub Actions builds Windows, macOS and Ubuntu packages on every push to `main`
+GitHub Actions builds Windows and Ubuntu packages on every push to `main`
 (this repo is based on the official [obs-plugintemplate](https://github.com/obsproject/obs-plugintemplate)).
 Pushing a tag such as `0.1.0` also creates a GitHub Release with the packages attached.
 
 It builds against OBS Studio 32.0.0 headers, so it loads in any OBS 32.x.
-The obs-deps and Qt downloads are checked against OBS's own published hashes. The OBS
-source archive hash is printed in the build log on first build (`pin this in buildspec.json`).
+The obs-deps and Qt downloads are checked against OBS's own published hashes, and the
+Windows OBS source archive hash is pinned. The macOS build is switched off for now: the
+template cannot yet configure OBS 32's Swift-based Metal renderer.
 
 Local build: `cmake --preset windows-x64` then `cmake --build --preset windows-x64`
 (see the template's documentation for prerequisites).
