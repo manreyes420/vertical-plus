@@ -43,7 +43,16 @@ runs:
 
         if [[ '${{ inputs.codesign }}' == 'true' ]] build_args+=(--codesign)
 
-        .github/scripts/build-macos ${build_args}
+        # Vertical+: keep a log and surface errors as annotations, since
+        # full job logs are not always reachable.
+        local -i rc=0
+        .github/scripts/build-macos ${build_args} 2>&1 | tee build-macos.log || rc=$?
+        if (( rc != 0 )) {
+          sed -e 's/\x1b\[[0-9;]*m//g' build-macos.log \
+            | grep -E 'error:|Error|FAILED|CMake Error|✖' | grep -v 'Werror' | tail -10 \
+            | while IFS= read -r l; do print "::error::${l}"; done
+          exit ${rc}
+        }
 
     - name: Install Dependencies 🛍️
       if: runner.os == 'Linux'
@@ -87,7 +96,27 @@ runs:
           Configuration = '${{ inputs.config }}'
         }
 
-        .github/scripts/Build-Windows.ps1 @BuildArgs
+        # Vertical+: keep a log and surface the key facts as annotations,
+        # since full job logs are not always reachable.
+        $ok = $true
+        try {
+          .github/scripts/Build-Windows.ps1 @BuildArgs *>&1 | Tee-Object -FilePath build-windows.log
+        } catch {
+          $ok = $false
+          Write-Output "::error::Build failed: $($_.Exception.Message)"
+        }
+        $log = Get-Content build-windows.log -ErrorAction SilentlyContinue
+        $log | Select-String -Pattern 'SHA256 = ' | Select-Object -First 1 | ForEach-Object { Write-Output "::notice::$($_.Line.Trim())" }
+        $warnings = @($log | Select-String -Pattern 'warning C\d+' | Where-Object { $_.Line -match 'vertical-plus' })
+        Write-Output "::notice::Vertical+ compiler warnings: $($warnings.Count)"
+        $warnings | Select-Object -First 8 | ForEach-Object { Write-Output "::warning::$($_.Line.Trim())" }
+        $log | Select-String -Pattern 'error C\d+|error LNK\d+|CMake Error' | Select-Object -First 10 | ForEach-Object { Write-Output "::error::$($_.Line.Trim())" }
+        if (Test-Path release) {
+          Get-ChildItem release -Recurse -File | ForEach-Object {
+            Write-Output "::notice::package file $($_.FullName.Substring((Resolve-Path release).Path.Length)) ($($_.Length) bytes)"
+          }
+        }
+        if (-not $ok) { exit 1 }
 
     - name: Create Summary 📊
       if: contains(fromJSON('["Linux", "macOS"]'),runner.os)
