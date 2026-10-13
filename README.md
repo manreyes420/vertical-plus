@@ -44,7 +44,11 @@ The same test with the naive setup (scene directly on an audio-mixing canvas) le
    - **Arrow keys** nudge 1 px (**Shift** = 10 px). **Esc** deselects.
    - **Double-click** a source, or right-click > **Edit Transform...**, for exact position, size, rotation and crop.
    - Right-click also has **Center on canvas**, **Reset Transform**, quick layouts (Fit / Fill / Top half / Bottom half), the link toggle, properties and filters.
-4. **Tools > Vertical+ Settings**: canvas size, reserved track, encoder, server and key, recording folder and format, start-with-main options.
+4. **Tools > Vertical+ Settings** (or **Settings** in the dock): pick your **Platform** and paste your **stream key**.
+   YouTube, Twitch and Facebook fill in the server for you. TikTok, Kick, Instagram and Custom also need the
+   **Server URL** the platform gives you next to the key (TikTok usually issues a new key every time you go live).
+   The same window has canvas size, reserved audio track, encoder, recording folder and start-with-main options.
+   If the vertical stream can't start or drops, the dock tells you why and offers to open Settings.
 5. Make sure your main outputs do not use the reserved track; the dock warns if they do.
 
 ### Automation
@@ -115,6 +119,8 @@ Local build: `cmake --preset windows-x64` then `cmake --build --preset windows-x
 | `src/transform-math.hpp`, `src/item-edit.hpp` | Preview move/resize geometry and scene item helpers |
 | `tests/test-audio-bus.cpp` | Headless libobs test of the audio isolation |
 | `tests/test-transform-math.cpp`, `tests/test-preview-edit.cpp` | Unit and libobs tests for preview move/resize |
+| `src/platforms.hpp` | Streaming platforms and their ingest servers |
+| `tests/test-stream.cpp` | libobs test: streams the vertical canvas to a local RTMP server, plus error cases |
 
 ## Status and known gaps
 

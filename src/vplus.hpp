@@ -45,7 +45,8 @@ struct Settings {
 	int video_bitrate = 6000; /* kbps */
 	int audio_bitrate = 160;  /* kbps */
 
-	std::string server;
+	std::string platform = "tiktok"; /* see platforms.hpp */
+	std::string server;              /* used when the platform has no fixed server */
 	std::string key;
 
 	std::string record_path;           /* empty = main recording folder */
@@ -145,9 +146,14 @@ void set_item_link_enabled(obs_sceneitem_t *item, bool enabled);
 namespace outputs {
 void init();
 void shutdown();
+/* Returns false when the stream cannot start; stream_error() says why. */
 bool start_stream();
 void stop_stream();
 bool streaming();
+bool stream_connecting();
+bool stream_reconnecting();
+/* Plain-language reason the last start failed or the stream dropped ("" if none). */
+std::string stream_error();
 bool start_record();
 void stop_record();
 bool recording();
@@ -155,7 +161,7 @@ std::string last_record_path();
 bool any_active();
 void reset_encoders(); /* call when settings or canvas size change */
 
-enum class Event { StreamStarted, StreamStopped, RecordStarted, RecordStopped };
+enum class Event { StreamStarted, StreamStopped, StreamFailed, StreamReconnecting, RecordStarted, RecordStopped };
 using EventFn = std::function<void(Event)>;
 void on_event(EventFn fn);
 } // namespace outputs

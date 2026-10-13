@@ -147,7 +147,13 @@ static void wire_events()
 		switch (e) {
 		case outputs::Event::StreamStarted:
 		case outputs::Event::StreamStopped:
-			obs_data_set_bool(d, "active", e == outputs::Event::StreamStarted);
+		case outputs::Event::StreamFailed:
+		case outputs::Event::StreamReconnecting:
+			obs_data_set_bool(d, "active",
+					  e == outputs::Event::StreamStarted || e == outputs::Event::StreamReconnecting);
+			obs_data_set_bool(d, "reconnecting", e == outputs::Event::StreamReconnecting);
+			if (e == outputs::Event::StreamFailed)
+				obs_data_set_string(d, "error", outputs::stream_error().c_str());
 			ws::emit("StreamStateChanged", d);
 			break;
 		case outputs::Event::RecordStarted:

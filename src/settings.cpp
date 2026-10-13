@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "vplus.hpp"
+#include "platforms.hpp"
 
 #include <util/bmem.h>
 #include <util/platform.h>
@@ -49,8 +50,9 @@ static void read_from_data(Settings &s, obs_data_t *d)
 	s.video_encoder = obs_data_get_string(d, "video_encoder");
 	s.video_bitrate = (int)obs_data_get_int(d, "video_bitrate");
 	s.audio_bitrate = (int)obs_data_get_int(d, "audio_bitrate");
-	s.server = obs_data_get_string(d, "server");
-	s.key = obs_data_get_string(d, "key");
+	s.platform = obs_data_get_string(d, "platform");
+	s.server = platforms::trim(obs_data_get_string(d, "server"));
+	s.key = platforms::trim(obs_data_get_string(d, "key"));
 	s.record_path = obs_data_get_string(d, "record_path");
 	s.record_format = obs_data_get_string(d, "record_format");
 	s.start_with_main_stream = obs_data_get_bool(d, "start_with_main_stream");
@@ -82,6 +84,7 @@ static void write_to_data(const Settings &s, obs_data_t *d)
 	obs_data_set_string(d, "video_encoder", s.video_encoder.c_str());
 	obs_data_set_int(d, "video_bitrate", s.video_bitrate);
 	obs_data_set_int(d, "audio_bitrate", s.audio_bitrate);
+	obs_data_set_string(d, "platform", s.platform.c_str());
 	obs_data_set_string(d, "server", s.server.c_str());
 	obs_data_set_string(d, "key", s.key.c_str());
 	obs_data_set_string(d, "record_path", s.record_path.c_str());
@@ -107,6 +110,7 @@ static void set_defaults(obs_data_t *d)
 	obs_data_set_default_int(d, "video_bitrate", def.video_bitrate);
 	obs_data_set_default_int(d, "audio_bitrate", def.audio_bitrate);
 	obs_data_set_default_string(d, "record_format", def.record_format.c_str());
+	obs_data_set_default_string(d, "platform", def.platform.c_str());
 	obs_data_set_default_int(d, "transition_ms", def.transition_ms);
 }
 
@@ -166,9 +170,34 @@ static bool reserve_now_clicked(obs_properties_t *, obs_property_t *, void *)
 	return false;
 }
 
+/* Show the server field only when the platform has no fixed server, and
+ * explain where to find the server and key. */
+static bool platform_changed(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	const platforms::Platform *p = platforms::find(obs_data_get_string(settings, "platform"));
+	obs_property_set_visible(obs_properties_get(props, "server"), p->server == nullptr);
+	obs_property_set_description(obs_properties_get(props, "platform_help"), obs_module_text(p->helpKey));
+	return true;
+}
+
 static obs_properties_t *ss_get_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
+
+	obs_properties_t *stream = obs_properties_create();
+	obs_property_t *plat = obs_properties_add_list(stream, "platform", obs_module_text("Platform"),
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	size_t count = 0;
+	const platforms::Platform *known = platforms::all(count);
+	for (size_t i = 0; i < count; i++)
+		obs_property_list_add_string(plat, obs_module_text(known[i].nameKey), known[i].id);
+	obs_property_set_modified_callback(plat, platform_changed);
+	obs_property_t *help = obs_properties_add_text(stream, "platform_help", "", OBS_TEXT_INFO);
+	obs_property_text_set_info_word_wrap(help, true);
+	obs_properties_add_text(stream, "server", obs_module_text("Server"), OBS_TEXT_DEFAULT);
+	obs_properties_add_text(stream, "key", obs_module_text("StreamKey"), OBS_TEXT_PASSWORD);
+	obs_properties_add_bool(stream, "start_with_main_stream", obs_module_text("StartWithMainStream"));
+	obs_properties_add_group(props, "stream", obs_module_text("Group.Stream"), OBS_GROUP_NORMAL, stream);
 
 	obs_properties_t *canvas = obs_properties_create();
 	obs_properties_add_int(canvas, "width", obs_module_text("Width"), 128, 4096, 2);
@@ -209,12 +238,6 @@ static obs_properties_t *ss_get_properties(void *)
 	obs_property_list_add_int(div, obs_module_text("FpsThird"), 3);
 	obs_properties_add_group(props, "encoder", obs_module_text("Group.Encoder"), OBS_GROUP_NORMAL, enc);
 
-	obs_properties_t *stream = obs_properties_create();
-	obs_properties_add_text(stream, "server", obs_module_text("Server"), OBS_TEXT_DEFAULT);
-	obs_properties_add_text(stream, "key", obs_module_text("StreamKey"), OBS_TEXT_PASSWORD);
-	obs_properties_add_bool(stream, "start_with_main_stream", obs_module_text("StartWithMainStream"));
-	obs_properties_add_group(props, "stream", obs_module_text("Group.Stream"), OBS_GROUP_NORMAL, stream);
-
 	obs_properties_t *rec = obs_properties_create();
 	obs_properties_add_path(rec, "record_path", obs_module_text("RecordPath"), OBS_PATH_DIRECTORY, nullptr,
 				nullptr);
@@ -242,13 +265,14 @@ static void ss_update(void *, obs_data_t *d)
 	s.current_scene = old.current_scene; /* not edited here */
 	g_settings = s;
 	settings_save();
+	vlog(LOG_INFO, "settings saved (platform %s, server %s, stream key %s)", s.platform.c_str(),
+	     platforms::resolve_server(s.platform, s.server).empty() ? "missing" : "set", s.key.empty() ? "missing" : "set");
 
 	if (old.width != s.width || old.height != s.height)
 		canvas::apply_video_settings();
 	if (old.width != s.width || old.height != s.height || old.video_encoder != s.video_encoder ||
 	    old.video_bitrate != s.video_bitrate || old.audio_bitrate != s.audio_bitrate ||
-	    old.fps_divisor != s.fps_divisor || old.audio_track != s.audio_track || old.server != s.server ||
-	    old.key != s.key)
+	    old.fps_divisor != s.fps_divisor || old.audio_track != s.audio_track)
 		outputs::reset_encoders();
 	if (old.enforce_reserved_track != s.enforce_reserved_track || old.audio_track != s.audio_track)
 		reserved_track_watch(s.enforce_reserved_track);

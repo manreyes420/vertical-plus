@@ -123,7 +123,7 @@ static void req_start_stream(obs_data_t *, obs_data_t *res, void *)
 		if (outputs::start_stream())
 			ok(res);
 		else
-			fail(res, "could not start the vertical stream (check server and key)");
+			fail(res, outputs::stream_error().c_str());
 	});
 }
 

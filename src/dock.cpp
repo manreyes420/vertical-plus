@@ -34,6 +34,7 @@
 #include <QListWidget>
 #include <QMainWindow>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPointer>
 #include <QPushButton>
@@ -659,11 +660,13 @@ public:
 		preview->onSelect = [this](int64_t id) { selectRow(id); };
 		preview->onContextMenu = [this](const QPoint &pos, int64_t id) { itemMenu(pos, id); };
 
-		connect(streamBtn, &QPushButton::clicked, this, []() {
-			if (outputs::streaming())
+		connect(streamBtn, &QPushButton::clicked, this, [this]() {
+			if (outputs::streaming() || outputs::stream_connecting()) {
 				outputs::stop_stream();
-			else
-				outputs::start_stream();
+			} else if (!outputs::start_stream()) {
+				showStreamError();
+			}
+			refreshButtons();
 		});
 		connect(recordBtn, &QPushButton::clicked, this, []() {
 			if (outputs::recording())
@@ -736,9 +739,33 @@ public:
 		selectRow(selectedId);
 	}
 
+	/* Explain why the vertical stream is not running, with a way to fix it. */
+	void showStreamError()
+	{
+		const std::string err = outputs::stream_error();
+		if (err.empty())
+			return;
+		QMessageBox box(this);
+		box.setIcon(QMessageBox::Warning);
+		box.setWindowTitle(obs_module_text("StreamError.Title"));
+		box.setText(QString::fromUtf8(err.c_str()));
+		QPushButton *open = box.addButton(obs_module_text("Dock.OpenSettings"), QMessageBox::AcceptRole);
+		box.addButton(QMessageBox::Close);
+		box.exec();
+		if (box.clickedButton() == open)
+			settings_open_dialog();
+	}
+
 	void refreshButtons()
 	{
-		streamBtn->setText(obs_module_text(outputs::streaming() ? "Dock.StopStream" : "Dock.StartStream"));
+		const char *streamKey = outputs::stream_reconnecting() ? "Dock.Reconnecting"
+					: outputs::streaming()          ? "Dock.StopStream"
+					: outputs::stream_connecting()  ? "Dock.Connecting"
+									: "Dock.StartStream";
+		streamBtn->setText(obs_module_text(streamKey));
+		streamBtn->setStyleSheet(outputs::streaming() && !outputs::stream_reconnecting()
+						 ? "QPushButton { background-color: #8b1a1a; color: white; }"
+						 : "");
 		recordBtn->setText(obs_module_text(outputs::recording() ? "Dock.StopRecord" : "Dock.StartRecord"));
 	}
 
@@ -1005,9 +1032,12 @@ void dock_create()
 		vlog(LOG_WARNING, "could not add the Vertical+ dock");
 
 	canvas::on_scene_changed([](const std::string &) { dock_refresh(); });
-	outputs::on_event([](outputs::Event) {
-		if (g_dock)
-			g_dock->refreshButtons();
+	outputs::on_event([](outputs::Event e) {
+		if (!g_dock)
+			return;
+		g_dock->refreshButtons();
+		if (e == outputs::Event::StreamFailed)
+			g_dock->showStreamError();
 	});
 }
 

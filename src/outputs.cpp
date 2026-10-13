@@ -5,11 +5,13 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "vplus.hpp"
+#include "platforms.hpp"
 
 #include <util/config-file.h>
 #include <util/platform.h>
 
 #include <atomic>
+#include <mutex>
 #include <cstring>
 
 namespace vplus::outputs {
@@ -25,6 +27,9 @@ static std::atomic<bool> g_record_active{false};
 static std::atomic<int> g_starting{0};
 static bool g_encoders_dirty = true;
 static std::string g_last_record_path;
+static std::atomic<bool> g_reconnecting{false};
+static std::mutex g_error_mutex;
+static std::string g_stream_error; /* why the last start failed or the stream dropped */
 static std::vector<EventFn> g_event_cbs;
 
 /* ------------------------------------------------------------------ */
@@ -149,9 +154,63 @@ static void emit(Event e)
 		fn(e);
 }
 
+static void set_stream_error(const std::string &msg)
+{
+	std::lock_guard<std::mutex> lock(g_error_mutex);
+	g_stream_error = msg;
+}
+
+/* Plain-language reason for an output stop code. */
+static std::string describe_stop(long long code, const char *detail)
+{
+	std::string msg;
+	switch (code) {
+	case OBS_OUTPUT_BAD_PATH:
+		msg = obs_module_text("StreamError.BadPath");
+		break;
+	case OBS_OUTPUT_CONNECT_FAILED:
+		msg = obs_module_text("StreamError.ConnectFailed");
+		break;
+	case OBS_OUTPUT_INVALID_STREAM:
+		msg = obs_module_text("StreamError.InvalidStream");
+		break;
+	case OBS_OUTPUT_DISCONNECTED:
+		msg = obs_module_text("StreamError.Disconnected");
+		break;
+	case OBS_OUTPUT_UNSUPPORTED:
+		msg = obs_module_text("StreamError.Unsupported");
+		break;
+	case OBS_OUTPUT_ENCODE_ERROR:
+		msg = obs_module_text("StreamError.EncodeError");
+		break;
+	default:
+		msg = obs_module_text("StreamError.Unknown");
+	}
+	if (detail && *detail)
+		msg += std::string("\n\n") + detail;
+	return msg;
+}
+
+static void stream_reconnect(void *, calldata_t *)
+{
+	g_reconnecting = true;
+	vlog(LOG_WARNING, "vertical stream lost its connection; reconnecting");
+	run_on_ui([]() { emit(Event::StreamReconnecting); });
+}
+
+static void stream_reconnect_success(void *, calldata_t *)
+{
+	g_reconnecting = false;
+	vlog(LOG_INFO, "vertical stream reconnected");
+	run_on_ui([]() { emit(Event::StreamStarted); });
+}
+
 static void stream_started(void *, calldata_t *)
 {
+	set_stream_error({});
+	g_reconnecting = false;
 	g_stream_active = true;
+	vlog(LOG_INFO, "vertical stream connected");
 	g_starting--;
 	run_on_ui([]() {
 		canvas::update_parking();
@@ -165,12 +224,18 @@ static void stream_stopped(void *, calldata_t *cd)
 	g_stream_active = false;
 	if (was_starting)
 		g_starting--;
+	g_reconnecting = false;
 	const long long code = calldata_int(cd, "code");
-	if (code != OBS_OUTPUT_SUCCESS)
-		vlog(LOG_WARNING, "vertical stream stopped with code %lld", code);
-	run_on_ui([]() {
+	if (code != OBS_OUTPUT_SUCCESS) {
+		obs_output_t *out = static_cast<obs_output_t *>(calldata_ptr(cd, "output"));
+		const char *detail = out ? obs_output_get_last_error(out) : nullptr;
+		vlog(LOG_WARNING, "vertical stream stopped with code %lld%s%s", code, detail ? ": " : "",
+		     detail ? detail : "");
+		set_stream_error(describe_stop(code, detail));
+	}
+	run_on_ui([code]() {
 		canvas::update_parking();
-		emit(Event::StreamStopped);
+		emit(code == OBS_OUTPUT_SUCCESS ? Event::StreamStopped : Event::StreamFailed);
 	});
 }
 
@@ -218,12 +283,31 @@ static void disconnect_output(obs_output_t *out, signal_callback_t on_start, sig
 
 bool start_stream()
 {
-	if (g_stream_active)
+	if (g_stream_active || (g_stream && obs_output_active(g_stream)))
 		return true;
-	if (settings().server.empty()) {
-		vlog(LOG_WARNING, "no vertical stream server set; open Vertical+ settings");
+
+	const platforms::Platform *platform = platforms::find(settings().platform);
+	const std::string server = platforms::resolve_server(settings().platform, settings().server);
+	const std::string key = platforms::trim(settings().key);
+	if (server.empty()) {
+		vlog(LOG_WARNING, "vertical stream not started: no server URL set");
+		set_stream_error(std::string(obs_module_text("StreamError.NoServer")) + "\n\n" +
+				 obs_module_text(platform->helpKey));
 		return false;
 	}
+	if (!platforms::looks_like_ingest_url(server)) {
+		vlog(LOG_WARNING, "vertical stream not started: server URL is not rtmp:// or rtmps://");
+		set_stream_error(obs_module_text("StreamError.ServerFormat"));
+		return false;
+	}
+	if (key.empty()) {
+		vlog(LOG_WARNING, "vertical stream not started: no stream key set");
+		set_stream_error(std::string(obs_module_text("StreamError.NoKey")) + "\n\n" +
+				 obs_module_text(platform->helpKey));
+		return false;
+	}
+	set_stream_error({});
+	vlog(LOG_INFO, "starting vertical stream (%s)", platform->id);
 
 	g_starting++;
 	canvas::update_parking(); /* make sure the canvas renders */
@@ -231,12 +315,13 @@ bool start_stream()
 	if (!ensure_encoders()) {
 		g_starting--;
 		canvas::update_parking();
+		set_stream_error(obs_module_text("StreamError.EncodeError"));
 		return false;
 	}
 
 	obs_data_t *ss = obs_data_create();
-	obs_data_set_string(ss, "server", settings().server.c_str());
-	obs_data_set_string(ss, "key", settings().key.c_str());
+	obs_data_set_string(ss, "server", server.c_str());
+	obs_data_set_string(ss, "key", key.c_str());
 	if (!g_service)
 		g_service = obs_service_create_private("rtmp_custom", "Vertical+ Service", ss);
 	else
@@ -251,6 +336,9 @@ bool start_stream()
 			return false;
 		}
 		connect_output(g_stream, stream_started, stream_stopped);
+		signal_handler_t *sh = obs_output_get_signal_handler(g_stream);
+		signal_handler_connect(sh, "reconnect", stream_reconnect, nullptr);
+		signal_handler_connect(sh, "reconnect_success", stream_reconnect_success, nullptr);
 	}
 
 	config_t *cfg = obs_frontend_get_profile_config();
@@ -265,11 +353,28 @@ bool start_stream()
 	if (!obs_output_start(g_stream)) {
 		const char *err = obs_output_get_last_error(g_stream);
 		vlog(LOG_ERROR, "vertical stream failed to start: %s", err ? err : "unknown error");
+		set_stream_error(describe_stop(OBS_OUTPUT_ERROR, err));
 		g_starting--;
 		canvas::update_parking();
 		return false;
 	}
 	return true;
+}
+
+bool stream_connecting()
+{
+	return !g_stream_active && g_stream && obs_output_active(g_stream);
+}
+
+bool stream_reconnecting()
+{
+	return g_reconnecting;
+}
+
+std::string stream_error()
+{
+	std::lock_guard<std::mutex> lock(g_error_mutex);
+	return g_stream_error;
 }
 
 void stop_stream()
@@ -404,6 +509,9 @@ void shutdown()
 	if (g_stream) {
 		obs_output_force_stop(g_stream);
 		disconnect_output(g_stream, stream_started, stream_stopped);
+		signal_handler_t *sh = obs_output_get_signal_handler(g_stream);
+		signal_handler_disconnect(sh, "reconnect", stream_reconnect, nullptr);
+		signal_handler_disconnect(sh, "reconnect_success", stream_reconnect_success, nullptr);
 		obs_output_release(g_stream);
 		g_stream = nullptr;
 	}
