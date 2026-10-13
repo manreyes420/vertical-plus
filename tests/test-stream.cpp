@@ -48,6 +48,14 @@ obs_output_t *obs_frontend_get_streaming_output(void)
 {
 	return nullptr;
 }
+obs_service_t *obs_frontend_get_streaming_service(void)
+{
+	return nullptr;
+}
+bool obs_frontend_streaming_active(void)
+{
+	return false;
+}
 const char *obs_module_text(const char *k)
 {
 	return k;

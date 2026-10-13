@@ -95,6 +95,10 @@ void apply_video_settings();
 void set_preview_visible(bool visible);
 void update_parking();
 bool parked();
+/* OBS's main stream started/stopped (keeps the canvas rendering when it is
+ * sent through Enhanced Broadcasting, e.g. Twitch Dual Format). */
+void set_main_streaming(bool live);
+bool used_by_dual_format();
 
 void refresh_hotkeys();
 void save_hotkeys();

@@ -51,6 +51,19 @@ The same test with the naive setup (scene directly on an audio-mixing canvas) le
    If the vertical stream can't start or drops, the dock tells you why and offers to open Settings.
 5. Make sure your main outputs do not use the reserved track; the dock warns if they do.
 
+### Twitch Dual Format (vertical view on your Twitch channel)
+
+Twitch shows a vertical view to phone viewers when your normal stream also sends a vertical canvas
+through Enhanced Broadcasting. Vertical+ works as that canvas (OBS 32+):
+
+1. OBS **Settings > Stream**: service **Twitch**, **Connect Account**, enable **Enhanced Broadcasting**.
+2. Set **Additional Canvas** to **Vertical+** and click OK.
+3. Start your normal stream with OBS's **Start Streaming** button (not the dock's vertical stream button).
+
+Vertical+ keeps the vertical canvas rendering while it is sent this way. Use the dock's own stream button
+for other platforms (TikTok, YouTube, Kick, ...). Twitch accepts only one stream per channel, so the dock
+refuses to send a second Twitch stream while your main stream is live on Twitch.
+
 ### Automation
 
 `CallVendorRequest` with `vendorName: "vertical-plus"`:

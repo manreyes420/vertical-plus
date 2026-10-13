@@ -6,7 +6,10 @@
  */
 #include "vplus.hpp"
 
+#include <util/config-file.h>
+
 #include <algorithm>
+#include <cstring>
 #include <list>
 
 namespace vplus::canvas {
@@ -313,12 +316,35 @@ bool parked()
 	return g_parked;
 }
 
+static bool g_main_streaming = false;
+
+/* True when OBS's own stream sends this canvas as the extra canvas of
+ * Enhanced Broadcasting (Twitch Dual Format):
+ * Settings > Stream > Additional Canvas = Vertical+. */
+bool used_by_dual_format()
+{
+	config_t *cfg = obs_frontend_get_profile_config();
+	if (!cfg || !g_canvas || !config_get_bool(cfg, "Stream1", "EnableMultitrackVideo"))
+		return false;
+	const char *uuid = config_get_string(cfg, "Stream1", "MultitrackExtraCanvas");
+	return uuid && strcmp(uuid, obs_canvas_get_uuid(g_canvas)) == 0;
+}
+
+void set_main_streaming(bool live)
+{
+	g_main_streaming = live;
+	if (live && used_by_dual_format())
+		vlog(LOG_INFO, "main stream is sending the vertical canvas (Enhanced Broadcasting / Dual Format)");
+	update_parking();
+}
+
 void update_parking()
 {
 	if (!g_canvas || !g_program)
 		return;
 
-	const bool needed = !settings().idle_parking || outputs::any_active() || g_preview_visible;
+	const bool needed = !settings().idle_parking || outputs::any_active() || g_preview_visible ||
+			    (g_main_streaming && used_by_dual_format());
 	if (needed && g_parked) {
 		obs_canvas_set_channel(g_canvas, 0, g_program);
 		g_parked = false;

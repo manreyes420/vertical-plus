@@ -306,6 +306,24 @@ bool start_stream()
 				 obs_module_text(platform->helpKey));
 		return false;
 	}
+	/* Twitch takes one stream per channel: a second connection with the
+	 * same key knocks the main stream off. Twitch's vertical view is sent
+	 * with the main stream instead (Enhanced Broadcasting / Dual Format). */
+	if (strcmp(platform->id, "twitch") == 0) {
+		bool mainIsTwitch = false;
+		if (obs_service_t *svc = obs_frontend_get_streaming_service()) {
+			obs_data_t *sd = obs_service_get_settings(svc);
+			const char *name = obs_data_get_string(sd, "service");
+			mainIsTwitch = name && strstr(name, "Twitch") != nullptr;
+			obs_data_release(sd);
+		}
+		if (mainIsTwitch && obs_frontend_streaming_active()) {
+			vlog(LOG_WARNING, "vertical stream not started: main stream is already live on Twitch");
+			set_stream_error(obs_module_text("StreamError.TwitchTwice"));
+			return false;
+		}
+	}
+
 	set_stream_error({});
 	vlog(LOG_INFO, "starting vertical stream (%s)", platform->id);
 

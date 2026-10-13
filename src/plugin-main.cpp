@@ -98,6 +98,14 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 			links::refresh();
 		break;
 
+	case OBS_FRONTEND_EVENT_STREAMING_STARTING:
+		if (g_ready)
+			canvas::set_main_streaming(true);
+		break;
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+		if (g_ready)
+			canvas::set_main_streaming(false);
+		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		if (g_ready && settings().start_with_main_stream)
 			outputs::start_stream();
