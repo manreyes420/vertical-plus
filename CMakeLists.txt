@@ -55,6 +55,8 @@ target_sources(
     src/websocket-api.cpp
     src/dock.cpp
     src/vplus.hpp
+    src/item-edit.hpp
+    src/transform-math.hpp
     src/external/obs-websocket-api.h
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)

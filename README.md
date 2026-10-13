@@ -37,9 +37,15 @@ The same test with the naive setup (scene directly on an audio-mixing canvas) le
 ## Using it
 
 1. Install, start OBS, open **Docks > Vertical+**.
-2. Add vertical scenes with **+**; add sources from the **+** menu (existing inputs, main scenes, or a **Main Canvas Reframe**). Right-click a source for Fit / Fill / Top half / Bottom half, link toggle, properties and filters.
-3. **Tools > Vertical+ Settings**: canvas size, reserved track, encoder, server and key, recording folder and format, start-with-main options.
-4. Make sure your main outputs do not use the reserved track; the dock warns if they do.
+2. Add vertical scenes with **+**; add sources from the **+** menu (existing inputs, main scenes, or a **Main Canvas Reframe**).
+3. Arrange sources right in the dock preview, like OBS's main preview:
+   - **Click** a source to select it (red outline with handles). **Drag** to move; it snaps to the canvas edges and centre (hold **Ctrl** to turn snapping off).
+   - **Drag a handle** to resize. Corners keep the shape; hold **Shift** to stretch freely. Edge handles stretch one side.
+   - **Arrow keys** nudge 1 px (**Shift** = 10 px). **Esc** deselects.
+   - **Double-click** a source, or right-click > **Edit Transform...**, for exact position, size, rotation and crop.
+   - Right-click also has **Center on canvas**, **Reset Transform**, quick layouts (Fit / Fill / Top half / Bottom half), the link toggle, properties and filters.
+4. **Tools > Vertical+ Settings**: canvas size, reserved track, encoder, server and key, recording folder and format, start-with-main options.
+5. Make sure your main outputs do not use the reserved track; the dock warns if they do.
 
 ### Automation
 
@@ -106,7 +112,9 @@ Local build: `cmake --preset windows-x64` then `cmake --build --preset windows-x
 | `src/websocket-api.cpp` | obs-websocket vendor requests and events |
 | `src/settings.cpp` | Per-profile `vertical-plus.json`, settings dialog |
 | `src/dock.cpp` | Qt dock: preview, scene and source lists, output buttons |
+| `src/transform-math.hpp`, `src/item-edit.hpp` | Preview move/resize geometry and scene item helpers |
 | `tests/test-audio-bus.cpp` | Headless libobs test of the audio isolation |
+| `tests/test-transform-math.cpp`, `tests/test-preview-edit.cpp` | Unit and libobs tests for preview move/resize |
 
 ## Status and known gaps
 
@@ -114,7 +122,7 @@ What has been checked: every source file compiles cleanly with GCC 13 and Clang 
 
 Known gaps (milestone 4 in the design spec):
 
-- Drag-to-transform in the dock preview (use the layout presets for now).
+- Rotated sources can be moved in the preview but are resized through Edit Transform.
 - Audio crossfade during vertical fades (audio cuts at the start of the transition).
 - Per-canvas volume for shared sources (the fader applies to both canvases).
 - Wayland preview; HDR colour handling in the Reframe source.

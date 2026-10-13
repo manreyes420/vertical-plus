@@ -3,8 +3,7 @@
  * visibility and link toggles, quick layouts, and output buttons.
  *
  * Plain Qt widgets with lambda connections (no moc needed).
- * Drag-to-transform inside the preview is milestone 4; for now items are
- * placed with the layout presets in the item context menu.
+ * The preview supports OBS-style select / move / resize of sources.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -14,15 +13,28 @@
 #include <obs-nix-platform.h>
 #endif
 
+#include "item-edit.hpp"
+#include "transform-math.hpp"
+
+#include <graphics/matrix4.h>
+#include <graphics/vec3.h>
+#include <graphics/vec4.h>
+
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <functional>
+#include <mutex>
 
 #include <QAction>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QMainWindow>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -35,10 +47,17 @@
 namespace vplus {
 
 /* ------------------------------------------------------------------ */
-/* Preview                                                            */
+/* Preview: live view of the vertical canvas with OBS-style editing.  */
+/*   click: select    drag: move (snaps to canvas edges and centre)   */
+/*   drag a handle: resize (corners keep shape; Shift = free stretch) */
+/*   Ctrl while dragging: no snapping    arrows: nudge 1 px (Shift 10)*/
+/*   double-click: Edit Transform        right-click: item menu       */
 
 class PreviewWidget : public QWidget {
 public:
+	std::function<void(int64_t)> onSelect;                      /* 0 = none */
+	std::function<void(const QPoint &, int64_t)> onContextMenu; /* global pos, item id */
+
 	explicit PreviewWidget(QWidget *parent) : QWidget(parent)
 	{
 		setAttribute(Qt::WA_PaintOnScreen);
@@ -47,13 +66,31 @@ public:
 		setAttribute(Qt::WA_OpaquePaintEvent);
 		setAttribute(Qt::WA_DontCreateNativeAncestors);
 		setAttribute(Qt::WA_NativeWindow);
+		setMouseTracking(true);
+		setFocusPolicy(Qt::ClickFocus);
 		setMinimumSize(90, 160);
 		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 	}
 
-	~PreviewWidget() override { destroyDisplay(); }
+	~PreviewWidget() override
+	{
+		endDrag();
+		destroyDisplay();
+		std::lock_guard<std::mutex> lock(sceneMutex);
+		obs_weak_source_release(weakScene);
+		weakScene = nullptr;
+	}
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
+
+	/* The scene shown in the preview, used for hit testing and outlines. */
+	void setScene(obs_scene_t *scene)
+	{
+		endDrag();
+		std::lock_guard<std::mutex> lock(sceneMutex);
+		obs_weak_source_release(weakScene);
+		weakScene = scene ? obs_source_get_weak_source(obs_scene_get_source(scene)) : nullptr;
+	}
 
 protected:
 	void showEvent(QShowEvent *e) override
@@ -78,8 +115,289 @@ protected:
 		}
 	}
 
+	void mousePressEvent(QMouseEvent *e) override
+	{
+		float cx, cy;
+		xform::Letterbox lb;
+		if (!mapToCanvas(e->position(), lb, cx, cy))
+			return;
+		obs_scene_t *scene = strongScene();
+		if (!scene)
+			return;
+
+		if (e->button() == Qt::RightButton) {
+			obs_sceneitem_t *hit = hitTest(scene, cx, cy);
+			if (hit) {
+				select_only(scene, hit);
+				notifySelect(hit);
+			}
+			obs_sceneitem_t *sel = selected_item(scene);
+			const int64_t id = sel ? obs_sceneitem_get_id(sel) : 0;
+			obs_scene_release(scene);
+			if (id && onContextMenu)
+				onContextMenu(e->globalPosition().toPoint(), id);
+			return;
+		}
+		if (e->button() != Qt::LeftButton) {
+			obs_scene_release(scene);
+			return;
+		}
+
+		const float tol = kHandlePx * lb.unitsPerPixel();
+		obs_sceneitem_t *target = nullptr;
+		int handle = xform::None;
+
+		/* A handle of the current selection takes priority. */
+		if (obs_sceneitem_t *sel = selected_item(scene)) {
+			handle = handleAt(sel, cx, cy, tol);
+			if (handle != xform::None)
+				target = sel;
+		}
+		if (!target) {
+			target = hitTest(scene, cx, cy);
+			select_only(scene, target);
+			notifySelect(target);
+		}
+
+		if (target && !obs_sceneitem_locked(target)) {
+			dragItem = target;
+			obs_sceneitem_addref(dragItem);
+			dragHandle = handle;
+			dragStartX = cx;
+			dragStartY = cy;
+			dragRect = item_rect(target);
+			obs_sceneitem_get_info2(target, &dragInfo);
+		}
+		obs_scene_release(scene);
+	}
+
+	void mouseMoveEvent(QMouseEvent *e) override
+	{
+		float cx, cy;
+		xform::Letterbox lb;
+		if (!mapToCanvas(e->position(), lb, cx, cy))
+			return;
+
+		if (!dragItem) {
+			updateHoverCursor(cx, cy, lb);
+			return;
+		}
+
+		const bool snap = !(e->modifiers() & Qt::ControlModifier);
+		const float snapTol = kSnapPx * lb.unitsPerPixel();
+
+		if (dragHandle == xform::None) {
+			float dx = cx - dragStartX, dy = cy - dragStartY;
+			if (snap) {
+				xform::Rect moved = dragRect;
+				moved.x += dx;
+				moved.y += dy;
+				float sdx, sdy;
+				xform::snap_move(moved, lb.canvasW, lb.canvasH, snapTol, sdx, sdy);
+				dx += sdx;
+				dy += sdy;
+			}
+			vec2 pos;
+			vec2_set(&pos, dragInfo.pos.x + dx, dragInfo.pos.y + dy);
+			obs_sceneitem_set_pos(dragItem, &pos);
+			return;
+		}
+
+		/* Resize. */
+		if (snap) {
+			const float xs[3] = {0.f, lb.canvasW * .5f, lb.canvasW};
+			const float ys[3] = {0.f, lb.canvasH * .5f, lb.canvasH};
+			cx = xform::snap_value(cx, xs, 3, snapTol);
+			cy = xform::snap_value(cy, ys, 3, snapTol);
+		}
+		const bool freeAspect = e->modifiers() & Qt::ShiftModifier;
+		const xform::Rect r = xform::resize(dragRect, dragHandle, cx, cy, freeAspect, 8.f);
+
+		apply_resize(dragItem, dragInfo, dragRect, r);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *e) override
+	{
+		if (e->button() == Qt::LeftButton)
+			endDrag();
+	}
+
+	void mouseDoubleClickEvent(QMouseEvent *e) override
+	{
+		float cx, cy;
+		xform::Letterbox lb;
+		if (e->button() != Qt::LeftButton || !mapToCanvas(e->position(), lb, cx, cy))
+			return;
+		endDrag();
+		if (obs_scene_t *scene = strongScene()) {
+			if (obs_sceneitem_t *hit = hitTest(scene, cx, cy))
+				obs_frontend_open_sceneitem_edit_transform(hit);
+			obs_scene_release(scene);
+		}
+	}
+
+	void keyPressEvent(QKeyEvent *e) override
+	{
+		const float step = (e->modifiers() & Qt::ShiftModifier) ? 10.f : 1.f;
+		float dx = 0.f, dy = 0.f;
+		switch (e->key()) {
+		case Qt::Key_Left:
+			dx = -step;
+			break;
+		case Qt::Key_Right:
+			dx = step;
+			break;
+		case Qt::Key_Up:
+			dy = -step;
+			break;
+		case Qt::Key_Down:
+			dy = step;
+			break;
+		case Qt::Key_Escape:
+			if (obs_scene_t *scene = strongScene()) {
+				select_only(scene, nullptr);
+				notifySelect(nullptr);
+				obs_scene_release(scene);
+			}
+			return;
+		default:
+			QWidget::keyPressEvent(e);
+			return;
+		}
+		if (obs_scene_t *scene = strongScene()) {
+			obs_sceneitem_t *sel = selected_item(scene);
+			if (sel && !obs_sceneitem_locked(sel)) {
+				vec2 pos;
+				obs_sceneitem_get_pos(sel, &pos);
+				pos.x += dx;
+				pos.y += dy;
+				obs_sceneitem_set_pos(sel, &pos);
+			}
+			obs_scene_release(scene);
+		}
+	}
+
 private:
+	static constexpr float kHandlePx = 7.f; /* handle grab radius, device px */
+	static constexpr float kSnapPx = 8.f;   /* snap distance, device px */
+	static constexpr float kHandleDrawPx = 8.f;
+
 	obs_display_t *display = nullptr;
+	std::mutex sceneMutex;
+	obs_weak_source_t *weakScene = nullptr;
+
+	obs_sceneitem_t *dragItem = nullptr; /* strong ref while dragging */
+	int dragHandle = xform::None;
+	float dragStartX = 0.f, dragStartY = 0.f;
+	xform::Rect dragRect;
+	obs_transform_info dragInfo = {};
+
+	obs_scene_t *strongScene()
+	{
+		std::lock_guard<std::mutex> lock(sceneMutex);
+		obs_source_t *src = obs_weak_source_get_source(weakScene);
+		obs_scene_t *scene = obs_scene_from_source(src);
+		if (!scene)
+			obs_source_release(src);
+		return scene; /* caller releases with obs_scene_release */
+	}
+
+	void endDrag()
+	{
+		if (dragItem) {
+			obs_sceneitem_release(dragItem);
+			dragItem = nullptr;
+		}
+		dragHandle = xform::None;
+	}
+
+	void notifySelect(obs_sceneitem_t *item)
+	{
+		if (onSelect)
+			onSelect(item ? obs_sceneitem_get_id(item) : 0);
+	}
+
+	bool mapToCanvas(const QPointF &p, xform::Letterbox &lb, float &cx, float &cy)
+	{
+		obs_canvas_t *c = canvas::get();
+		obs_video_info ovi = {};
+		if (!c || !obs_canvas_get_video_info(c, &ovi))
+			return false;
+		const qreal dpr = devicePixelRatioF();
+		lb = xform::Letterbox::fit((uint32_t)std::lround(width() * dpr), (uint32_t)std::lround(height() * dpr),
+					   ovi.base_width, ovi.base_height);
+		if (!lb.valid())
+			return false;
+		lb.toCanvas((float)(p.x() * dpr), (float)(p.y() * dpr), cx, cy);
+		return true;
+	}
+
+	/* Topmost visible item under the point. */
+	static obs_sceneitem_t *hitTest(obs_scene_t *scene, float cx, float cy)
+	{
+		struct Ctx {
+			float x, y;
+			obs_sceneitem_t *hit;
+		} ctx{cx, cy, nullptr};
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+				auto *c = static_cast<Ctx *>(param);
+				if (obs_sceneitem_visible(item) && item_contains(item, c->x, c->y))
+					c->hit = item; /* later = higher in the stack */
+				return true;
+			},
+			&ctx);
+		return ctx.hit;
+	}
+
+	static int handleAt(obs_sceneitem_t *item, float cx, float cy, float tol)
+	{
+		if (!item_unrotated(item))
+			return xform::None; /* rotated items: move only (use Edit Transform) */
+		const xform::Rect r = item_rect(item);
+		for (int h = 0; h < 8; h++) {
+			float fx, fy;
+			xform::handle_fraction(h, fx, fy);
+			const float hx = r.x + r.w * fx, hy = r.y + r.h * fy;
+			if (std::fabs(cx - hx) <= tol && std::fabs(cy - hy) <= tol)
+				return h;
+		}
+		return xform::None;
+	}
+
+	void updateHoverCursor(float cx, float cy, const xform::Letterbox &lb)
+	{
+		Qt::CursorShape shape = Qt::ArrowCursor;
+		if (obs_scene_t *scene = strongScene()) {
+			obs_sceneitem_t *sel = selected_item(scene);
+			const int h = sel ? handleAt(sel, cx, cy, kHandlePx * lb.unitsPerPixel()) : xform::None;
+			switch (h) {
+			case xform::TopLeft:
+			case xform::BottomRight:
+				shape = Qt::SizeFDiagCursor;
+				break;
+			case xform::TopRight:
+			case xform::BottomLeft:
+				shape = Qt::SizeBDiagCursor;
+				break;
+			case xform::Left:
+			case xform::Right:
+				shape = Qt::SizeHorCursor;
+				break;
+			case xform::Top:
+			case xform::Bottom:
+				shape = Qt::SizeVerCursor;
+				break;
+			default:
+				if (obs_sceneitem_t *hit = hitTest(scene, cx, cy))
+					shape = obs_sceneitem_locked(hit) ? Qt::ArrowCursor : Qt::SizeAllCursor;
+			}
+			obs_scene_release(scene);
+		}
+		if (cursor().shape() != shape)
+			setCursor(shape);
+	}
 
 	void createDisplay()
 	{
@@ -116,7 +434,75 @@ private:
 		display = nullptr;
 	}
 
-	static void draw(void *, uint32_t cx, uint32_t cy)
+	/* ---- drawing (graphics thread) ---- */
+
+	static void drawRectOutline(const xform::Rect &r)
+	{
+		gs_render_start(true);
+		gs_vertex2f(r.x, r.y);
+		gs_vertex2f(r.right(), r.y);
+		gs_vertex2f(r.right(), r.bottom());
+		gs_vertex2f(r.x, r.bottom());
+		gs_vertex2f(r.x, r.y);
+		gs_render_stop(GS_LINESTRIP);
+	}
+
+	static void drawFilledSquare(float cx, float cy, float size)
+	{
+		const float h = size * .5f;
+		gs_render_start(true);
+		gs_vertex2f(cx - h, cy - h);
+		gs_vertex2f(cx + h, cy - h);
+		gs_vertex2f(cx - h, cy + h);
+		gs_vertex2f(cx + h, cy + h);
+		gs_render_stop(GS_TRISTRIP);
+	}
+
+	void drawSelection(const xform::Letterbox &lb)
+	{
+		obs_scene_t *scene = strongScene();
+		if (!scene)
+			return;
+
+		gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+		gs_technique_t *tech = gs_effect_get_technique(solid, "Solid");
+		gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
+		vec4 red;
+		vec4_set(&red, 1.f, 0.f, 0.f, 1.f);
+		gs_effect_set_vec4(color, &red);
+
+		const float handleSize = kHandleDrawPx * lb.unitsPerPixel();
+		gs_technique_begin(tech);
+		gs_technique_begin_pass(tech, 0);
+
+		struct Ctx {
+			float handleSize;
+		} ctx{handleSize};
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+				if (!obs_sceneitem_selected(item))
+					return true;
+				const float hs = static_cast<Ctx *>(param)->handleSize;
+				const xform::Rect r = item_rect(item);
+				drawRectOutline(r);
+				if (item_unrotated(item) && !obs_sceneitem_locked(item)) {
+					for (int h = 0; h < 8; h++) {
+						float fx, fy;
+						xform::handle_fraction(h, fx, fy);
+						drawFilledSquare(r.x + r.w * fx, r.y + r.h * fy, hs);
+					}
+				}
+				return true;
+			},
+			&ctx);
+
+		gs_technique_end_pass(tech);
+		gs_technique_end(tech);
+		obs_scene_release(scene);
+	}
+
+	static void draw(void *data, uint32_t cx, uint32_t cy)
 	{
 		/* Runs on the graphics thread: take a strong reference so a
 		 * scene-collection switch cannot free the canvas mid-draw. */
@@ -129,18 +515,18 @@ private:
 			return;
 		}
 
-		/* Letterbox the canvas into the widget. */
-		const float sx = (float)cx / (float)ovi.base_width;
-		const float sy = (float)cy / (float)ovi.base_height;
-		const float scale = sx < sy ? sx : sy;
-		const int w = (int)(ovi.base_width * scale), h = (int)(ovi.base_height * scale);
-		const int x = ((int)cx - w) / 2, y = ((int)cy - h) / 2;
+		const xform::Letterbox lb = xform::Letterbox::fit(cx, cy, ovi.base_width, ovi.base_height);
+		if (!lb.valid()) {
+			obs_canvas_release(c);
+			return;
+		}
 
 		gs_viewport_push();
 		gs_projection_push();
 		gs_ortho(0.0f, (float)ovi.base_width, 0.0f, (float)ovi.base_height, -100.0f, 100.0f);
-		gs_set_viewport(x, y, w, h);
+		gs_set_viewport(lb.x, lb.y, lb.w, lb.h);
 		obs_render_canvas_texture(c);
+		static_cast<PreviewWidget *>(data)->drawSelection(lb);
 		gs_projection_pop();
 		gs_viewport_pop();
 		obs_canvas_release(c);
@@ -261,7 +647,17 @@ public:
 			});
 		});
 		connect(items, &QListWidget::customContextMenuRequested, this,
-			[this](const QPoint &pos) { itemMenu(items->mapToGlobal(pos)); });
+			[this](const QPoint &pos) { itemMenu(items->mapToGlobal(pos), currentItemId()); });
+		connect(items, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *it, QListWidgetItem *) {
+			if (updating)
+				return;
+			const int64_t id = it ? it->data(Qt::UserRole).toLongLong() : 0;
+			withCurrentScene([id](obs_scene_t *scene) {
+				select_only(scene, id ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr);
+			});
+		});
+		preview->onSelect = [this](int64_t id) { selectRow(id); };
+		preview->onContextMenu = [this](const QPoint &pos, int64_t id) { itemMenu(pos, id); };
 
 		connect(streamBtn, &QPushButton::clicked, this, []() {
 			if (outputs::streaming())
@@ -291,6 +687,9 @@ public:
 				scenes->setCurrentItem(it);
 		}
 		updating = false;
+		obs_scene_t *cur = canvas::get_scene(current.c_str());
+		preview->setScene(cur);
+		obs_scene_release(cur);
 		connectScene();
 		refreshItems();
 		refreshButtons();
@@ -311,7 +710,8 @@ public:
 	{
 		updating = true;
 		items->clear();
-		withCurrentScene([this](obs_scene_t *scene) {
+		int64_t selectedId = 0;
+		withCurrentScene([this, &selectedId](obs_scene_t *scene) {
 			obs_scene_enum_items(
 				scene,
 				[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
@@ -320,6 +720,7 @@ public:
 					QString label = QString::fromUtf8(obs_source_get_name(src));
 					/* Top of the list = top of the stack, like OBS. */
 					auto *it = new QListWidgetItem(label);
+					it->setData(Qt::UserRole, QVariant::fromValue<qlonglong>(obs_sceneitem_get_id(item)));
 					it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
 					it->setCheckState(obs_sceneitem_visible(item) ? Qt::Checked : Qt::Unchecked);
 					if (!links::item_link_enabled(item))
@@ -328,8 +729,11 @@ public:
 					return true;
 				},
 				items);
+			if (obs_sceneitem_t *sel = selected_item(scene))
+				selectedId = obs_sceneitem_get_id(sel);
 		});
 		updating = false;
+		selectRow(selectedId);
 	}
 
 	void refreshButtons()
@@ -390,12 +794,30 @@ private:
 		connectedScene = nullptr;
 	}
 
-	obs_sceneitem_t *selectedItem(obs_scene_t *scene)
+	int64_t currentItemId() const
 	{
 		QListWidgetItem *it = items->currentItem();
-		if (!it)
-			return nullptr;
-		return obs_scene_find_source(scene, it->text().toUtf8().constData());
+		return it ? it->data(Qt::UserRole).toLongLong() : 0;
+	}
+
+	obs_sceneitem_t *selectedItem(obs_scene_t *scene)
+	{
+		const int64_t id = currentItemId();
+		return id ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+	}
+
+	void selectRow(int64_t id)
+	{
+		const bool prev = updating;
+		updating = true;
+		items->setCurrentItem(nullptr);
+		for (int i = 0; id && i < items->count(); i++) {
+			if (items->item(i)->data(Qt::UserRole).toLongLong() == id) {
+				items->setCurrentItem(items->item(i));
+				break;
+			}
+		}
+		updating = prev;
 	}
 
 	void buildAddMenu(QMenu *menu)
@@ -511,12 +933,14 @@ private:
 		obs_sceneitem_set_info2(item, &info);
 	}
 
-	void itemMenu(const QPoint &globalPos)
+	void itemMenu(const QPoint &globalPos, int64_t id)
 	{
+		if (!id)
+			return;
 		obs_scene_t *scene = canvas::get_scene(canvas::current_scene().c_str());
 		if (!scene)
 			return;
-		obs_sceneitem_t *item = selectedItem(scene);
+		obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(scene, id);
 		if (!item) {
 			obs_scene_release(scene);
 			return;
@@ -525,6 +949,23 @@ private:
 		obs_scene_release(scene);
 
 		QMenu menu(this);
+		connect(menu.addAction(obs_module_text("Dock.EditTransform")), &QAction::triggered, this,
+			[item]() { obs_frontend_open_sceneitem_edit_transform(item); });
+		connect(menu.addAction(obs_module_text("Dock.CenterItem")), &QAction::triggered, this, [item]() {
+			const xform::Rect r = item_rect(item);
+			place_item_at(item, ((float)settings().width - r.w) * .5f, ((float)settings().height - r.h) * .5f);
+		});
+		connect(menu.addAction(obs_module_text("Dock.ResetTransform")), &QAction::triggered, this, [item]() {
+			obs_transform_info info = {};
+			vec2_set(&info.scale, 1.f, 1.f);
+			info.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+			info.bounds_type = OBS_BOUNDS_NONE;
+			info.bounds_alignment = OBS_ALIGN_CENTER;
+			obs_sceneitem_set_info2(item, &info);
+			obs_sceneitem_crop crop = {};
+			obs_sceneitem_set_crop(item, &crop);
+		});
+		menu.addSeparator();
 		struct L {
 			const char *key;
 			const char *layout;
