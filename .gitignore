@@ -9,7 +9,6 @@
 !/installer
 !/tests
 !/src
-!/tools
 !.clang-format
 !.gersemirc
 !.gitignore
